@@ -11,15 +11,23 @@ source("login.R")
 source("top_rated_page.R")
 
 
-# ======================================================
-# DATABASE CONNECTION
-# ======================================================
-con <- dbConnect(
-  RMySQL::MySQL(),
-  host = "localhost",
-  user = "root",
-  password = "",
-  dbname = "movie_watchlist"
+DB_HOST <- Sys.getenv("DB_HOST", "host.docker.internal")
+DB_USER <- Sys.getenv("DB_USER", "root")
+DB_PASS <- Sys.getenv("DB_PASS", "")
+DB_NAME <- Sys.getenv("DB_NAME", "movie_watchlist")
+
+con <- tryCatch(
+  {
+    dbConnect(
+      RMySQL::MySQL(),
+      host = DB_HOST,
+      user = DB_USER,
+      password = DB_PASS,
+      dbname = DB_NAME,
+      port = as.integer(Sys.getenv("DB_PORT", "3306"))
+    )
+  },
+  error = function(e) stop(paste0("Failed to connect to database: ", conditionMessage(e)))
 )
 
 # ======================================================
