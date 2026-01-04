@@ -6,29 +6,38 @@ library(shinyWidgets)
 library(DBI)
 library(RMySQL)
 library(jsonlite)
+library(RMariaDB)
 
 source("login.R")
 source("top_rated_page.R")
 
 
-DB_HOST <- Sys.getenv("DB_HOST", "host.docker.internal")
-DB_USER <- Sys.getenv("DB_USER", "root")
-DB_PASS <- Sys.getenv("DB_PASS", "")
-DB_NAME <- Sys.getenv("DB_NAME", "movie_watchlist")
+DB_HOST <- Sys.getenv("DB_HOST")
+DB_PORT <- as.integer(Sys.getenv("DB_PORT", "3306"))
+DB_USER <- Sys.getenv("DB_USER")
+DB_PASS <- Sys.getenv("DB_PASS")
+DB_NAME <- Sys.getenv("DB_NAME")
+DB_SSL_CA <- Sys.getenv("DB_SSL_CA")
 
 con <- tryCatch(
   {
     dbConnect(
-      RMySQL::MySQL(),
+      RMariaDB::MariaDB(),
       host = DB_HOST,
+      port = DB_PORT,
       user = DB_USER,
       password = DB_PASS,
       dbname = DB_NAME,
-      port = as.integer(Sys.getenv("DB_PORT", "3306"))
+      ssl.ca = DB_SSL_CA,
+      ssl.verify.server.cert = TRUE
     )
   },
-  error = function(e) stop(paste0("Failed to connect to database: ", conditionMessage(e)))
+  error = function(e) {
+    stop(paste0("❌ Failed to connect to Aiven MySQL: ", conditionMessage(e)))
+  }
 )
+
+cat("✅ Connected to Aiven MySQL successfully\n")
 
 # ======================================================
 # UI
