@@ -17,7 +17,7 @@ DB_PORT   <- as.integer(Sys.getenv("DB_PORT", "3306"))
 DB_USER   <- Sys.getenv("DB_USER")
 DB_PASS   <- Sys.getenv("DB_PASS")
 DB_NAME   <- Sys.getenv("DB_NAME")
-DB_SSL_CA <- Sys.getenv("DB_SSL_CA")
+DB_SSL_CA <- Sys.getenv("DB_SSL_CA", "/srv/shiny-server/app/ca.pem")
 
 get_con <- function() {
   # log useful info in Render logs (no password printed)
