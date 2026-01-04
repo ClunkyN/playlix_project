@@ -12,8 +12,8 @@ RUN apt-get update && apt-get install -y \
 RUN R -e "install.packages(c('shiny','shinyWidgets','DBI','RMariaDB','jsonlite','digest'), repos='https://cloud.r-project.org')"
 
 # Copy your app into /app (served at /app/)
-COPY . /srv/shiny-server/app
-RUN chmod -R 755 /srv/shiny-server/app
+COPY . /srv/shiny-server/
+RUN chmod -R 755 /srv/shiny-server
 
 # Put Aiven CA cert into container (you must add ca.pem in repo root)
 COPY ca.pem /etc/ssl/certs/aiven-ca.pem
