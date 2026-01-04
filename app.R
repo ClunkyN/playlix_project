@@ -47,7 +47,7 @@ get_con <- function() {
   )
   
   # Ensure table exists so SELECT won't crash your worker
-  DBI::dbExecute(con, "
+  DBI::db_exec("
     CREATE TABLE IF NOT EXISTS movies (
       id INT AUTO_INCREMENT PRIMARY KEY,
       title VARCHAR(255) NOT NULL,
@@ -165,7 +165,7 @@ server <- function(input, output, session) {
   
   tryCatch({
     con <<- get_con()
-    DBI::dbExecute(con, "
+    DBI::db_exec("
   CREATE TABLE IF NOT EXISTS movies (
     id INT AUTO_INCREMENT PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
@@ -228,7 +228,7 @@ server <- function(input, output, session) {
         con <<- get_con()
         db_error(NULL)
         
-        DBI::dbExecute(con, "
+        DBI::db_exec("
         CREATE TABLE IF NOT EXISTS movies (
           id INT AUTO_INCREMENT PRIMARY KEY,
           title VARCHAR(255) NOT NULL,
@@ -254,7 +254,26 @@ server <- function(input, output, session) {
     }
     con
   }
-
+  
+  db_exec <- function(sql, params = NULL) {
+    tryCatch({
+      DBI::dbExecute(ensure_con(), sql, params = params)
+    }, error = function(e) {
+      # retry once after reconnect
+      con <<- NULL
+      DBI::dbExecute(ensure_con(), sql, params = params)
+    })
+  }
+  
+  db_get <- function(sql, params = NULL) {
+    tryCatch({
+      DBI::dbGetQuery(ensure_con(), sql, params = params)
+    }, error = function(e) {
+      # retry once after reconnect
+      con <<- NULL
+      DBI::dbGetQuery(ensure_con(), sql, params = params)
+    })
+  }
   
   login_server(input, output, session, logged_in)
 
@@ -634,8 +653,7 @@ server <- function(input, output, session) {
                                e   = current_episode_idx()) {
     if (is.null(mid) || is.null(s) || is.null(e)) return()
     
-    dbExecute(
-      con,
+    db_exec(
       paste0(
         "UPDATE movies SET ",
         "last_season = ", as.integer(s), ", ",
@@ -710,8 +728,7 @@ server <- function(input, output, session) {
           
           
           
-          dbExecute(
-            con,
+          db_exec(
             paste0(
               "UPDATE movies 
               SET finished = 1,
@@ -1026,8 +1043,7 @@ server <- function(input, output, session) {
         
         new_val <- ifelse(m$favorite == 1, 0, 1)
         
-        dbExecute(
-          con,
+        db_exec(
           paste0(
             "UPDATE movies SET favorite = ",
             new_val,
@@ -1281,8 +1297,7 @@ server <- function(input, output, session) {
         rating <- as.numeric(input$detail_rating)
         rating_sql <- if (is.na(rating)) "NULL" else round(rating, 1)
         
-        dbExecute(
-          con,
+        db_exec(
           paste0(
             "UPDATE movies SET
             finished = 1,
@@ -1296,8 +1311,7 @@ server <- function(input, output, session) {
         
       } else {
         
-        dbExecute(
-          con,
+        db_exec(
           paste0(
             "UPDATE movies 
            SET finished = 0,
@@ -1613,8 +1627,7 @@ server <- function(input, output, session) {
           
           # 🔒 DO NOT override finished movies
           if (!isTRUE(m$finished == 1)) {
-            dbExecute(
-              con,
+            db_exec(
               paste0(
                 "UPDATE movies SET
          currently_watching = 1
@@ -2063,8 +2076,7 @@ server <- function(input, output, session) {
       video_db <- jsonlite::toJSON(seasons, auto_unbox = TRUE)
     }
     
-    dbExecute(
-      con,
+    db_exec(
       paste0(
         "INSERT INTO movies (title,year_released,genre,type,description,finished,rating,poster_path,video_path,youtube_trailer) VALUES(",
         dbQuoteString(ensure_con(), input$new_title), ",",
