@@ -20,15 +20,27 @@ source("top_rated_page.R")
 # DATABASE CONNECTION
 # ======================================================
 get_con <- function() {
-  dbConnect(
-    RMariaDB::MariaDB(),
-    host     = Sys.getenv("DB_HOST"),
-    port     = as.integer(Sys.getenv("DB_PORT", "3306")),
-    user     = Sys.getenv("DB_USER"),
-    password = Sys.getenv("DB_PASS"),
-    dbname   = Sys.getenv("DB_NAME"),
-    ssl.ca   = Sys.getenv("DB_SSL_CA")
-  )
+  DB_HOST   <- Sys.getenv("DB_HOST")
+  DB_PORT   <- as.integer(Sys.getenv("DB_PORT", "3306"))
+  DB_USER   <- Sys.getenv("DB_USER")
+  DB_PASS   <- Sys.getenv("DB_PASS")
+  DB_NAME   <- Sys.getenv("DB_NAME")
+  DB_SSL_CA <- Sys.getenv("DB_SSL_CA")
+  
+  tryCatch({
+    dbConnect(
+      RMariaDB::MariaDB(),
+      host     = DB_HOST,
+      port     = DB_PORT,
+      user     = DB_USER,
+      password = DB_PASS,
+      dbname   = DB_NAME,
+      ssl.ca   = DB_SSL_CA
+    )
+  }, error = function(e) {
+    message("❌ DB CONNECT FAILED: ", conditionMessage(e))
+    NULL
+  })
 }
 
 con <- get_con()
@@ -319,9 +331,10 @@ server <- function(input, output, session) {
   
   load_movies <- reactive({
     refresh_trigger()
+    req(!is.null(con))
     dbGetQuery(con,"SELECT * FROM movies ORDER BY id DESC")
-    
   })
+  
   top_rated_server(input, output, session, load_movies)
   
   filtered_movies <- reactive({
