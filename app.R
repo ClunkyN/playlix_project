@@ -151,6 +151,49 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
   
   login_server(input, output, session, logged_in)
+  observeEvent(logged_in(), {
+    req(logged_in())
+    
+    message("========== DB CONNECTION TEST ==========")
+    
+    message("DB_HOST=", Sys.getenv("DB_HOST"))
+    message("DB_PORT=", Sys.getenv("DB_PORT"))
+    message("DB_USER=", Sys.getenv("DB_USER"))
+    message("DB_NAME=", Sys.getenv("DB_NAME"))
+    message("DB_SSL_CA=", Sys.getenv("DB_SSL_CA"))
+    
+    message("CA exists? ", file.exists(Sys.getenv("DB_SSL_CA")))
+    message("Fallback CA exists? ", file.exists("/srv/shiny-server/ca.pem"))
+    
+    tryCatch({
+      con <- db_con()
+      message("✅ db_con(): SUCCESS")
+      
+      dbname <- dbGetQuery(con, "SELECT DATABASE() AS db")$db[1]
+      message("✅ Connected database = ", dbname)
+      
+      tables <- dbGetQuery(con, "SHOW TABLES")
+      message("✅ Tables found = ", nrow(tables))
+      if (nrow(tables) > 0) {
+        message("Tables: ", paste(tables[[1]], collapse = ", "))
+      }
+      
+      if ("movies" %in% tables[[1]]) {
+        cnt <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM movies")$n[1]
+        message("✅ movies row count = ", cnt)
+      } else {
+        message("❌ movies table NOT FOUND")
+      }
+      
+      dbDisconnect(con)
+    }, error = function(e) {
+      message("❌ DB CONNECTION FAILED: ", conditionMessage(e))
+    })
+    
+    message("========== END DB TEST ==========")
+    
+  }, ignoreInit = TRUE)
+  
   output$app_page <- renderUI({
     if (logged_in()) {
       main_ui
