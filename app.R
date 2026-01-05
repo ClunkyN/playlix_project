@@ -20,58 +20,115 @@ source("login.R")
 source("top_rated_page.R")
 
 # ======================================================
-# DATABASE HELPERS (RENDER / AIVEN SAFE)
+# DATABASE HELPERS (RENDER + AIVEN MariaDB)
+# - Works with SSL CA
+# - Handles DB_HOST with or without ":port"
+# - Prevents app crash (returns safe errors)
+# - Provides "proof" you're on Aiven
 # ======================================================
 
-db_con <- function() {
-  ca <- Sys.getenv("DB_SSL_CA", "")
+parse_host_port <- function(host, port_default = 3306) {
+  host <- trimws(host %||% "")
+  if (!nzchar(host)) return(list(host = "", port = port_default))
   
-  # fallback to the Docker path you COPY'd
-  if (!nzchar(ca) || !file.exists(ca)) {
-    if (file.exists("/srv/shiny-server/ca.pem")) {
-      ca <- "/srv/shiny-server/ca.pem"
-    }
+  # If host is like "xxx.aivencloud.com:12345"
+  if (grepl(":", host, fixed = TRUE)) {
+    parts <- strsplit(host, ":", fixed = TRUE)[[1]]
+    h <- parts[1]
+    p <- suppressWarnings(as.integer(parts[2]))
+    if (is.na(p)) p <- port_default
+    return(list(host = h, port = p))
   }
   
-  dbConnect(
+  list(host = host, port = port_default)
+}
+
+`%||%` <- function(a, b) if (!is.null(a) && length(a) > 0 && !is.na(a) && nzchar(as.character(a))) a else b
+
+resolve_ca_path <- function() {
+  ca <- Sys.getenv("DB_SSL_CA", "")
+  if (nzchar(ca) && file.exists(ca)) return(ca)
+  
+  # fallback location you COPY into image
+  if (file.exists("/srv/shiny-server/ca.pem")) return("/srv/shiny-server/ca.pem")
+  
+  # common alt paths (optional)
+  if (file.exists("/etc/ssl/certs/ca.pem")) return("/etc/ssl/certs/ca.pem")
+  
+  ""  # no CA found
+}
+
+db_con <- function() {
+  hp <- parse_host_port(Sys.getenv("DB_HOST", ""), as.integer(Sys.getenv("DB_PORT", "3306")))
+  ca <- resolve_ca_path()
+  
+  # ---- HARD FAIL EARLY with readable errors ----
+  if (!nzchar(hp$host)) stop("DB_HOST is empty. Set DB_HOST in Render environment variables.")
+  if (!nzchar(Sys.getenv("DB_USER", ""))) stop("DB_USER is empty. Set DB_USER in Render env vars.")
+  if (!nzchar(Sys.getenv("DB_PASS", ""))) stop("DB_PASS is empty. Set DB_PASS in Render env vars.")
+  if (!nzchar(Sys.getenv("DB_NAME", ""))) stop("DB_NAME is empty. Set DB_NAME in Render env vars.")
+  
+  # Aiven requires SSL; if CA missing, fail with clear message
+  if (!nzchar(ca)) {
+    stop("SSL CA file not found. Set DB_SSL_CA to the CA path or copy ca.pem to /srv/shiny-server/ca.pem.")
+  }
+  
+  con <- DBI::dbConnect(
     RMariaDB::MariaDB(),
-    host     = Sys.getenv("DB_HOST"),
-    port     = as.integer(Sys.getenv("DB_PORT", "3306")),
+    host     = hp$host,
+    port     = hp$port,
     user     = Sys.getenv("DB_USER"),
     password = Sys.getenv("DB_PASS"),
     dbname   = Sys.getenv("DB_NAME"),
     ssl.ca   = ca,
     ssl.verify.server.cert = TRUE,
-    timeout  = 10
+    timeout  = 15
   )
+  
+  con
 }
 
 db_get <- function(sql) {
-  con <- tryCatch(db_con(), error = function(e) e)
-  if (inherits(con, "error")) {
-    message("❌ db_con failed in db_get: ", conditionMessage(con))
-    stop(con)
-  }
-  on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-  dbGetQuery(con, sql)
+  con <- NULL
+  out <- tryCatch({
+    con <- db_con()
+    DBI::dbGetQuery(con, sql)
+  }, error = function(e) {
+    message("❌ db_get error: ", conditionMessage(e))
+    NULL
+  }, finally = {
+    if (!is.null(con)) try(DBI::dbDisconnect(con), silent = TRUE)
+  })
+  out
 }
 
 db_exec <- function(sql) {
-  con <- tryCatch(db_con(), error = function(e) e)
-  if (inherits(con, "error")) {
-    message("❌ db_con failed in db_exec: ", conditionMessage(con))
-    stop(con)
-  }
-  on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-  dbExecute(con, sql)
+  con <- NULL
+  out <- tryCatch({
+    con <- db_con()
+    DBI::dbExecute(con, sql)
+  }, error = function(e) {
+    message("❌ db_exec error: ", conditionMessage(e))
+    NULL
+  }, finally = {
+    if (!is.null(con)) try(DBI::dbDisconnect(con), silent = TRUE)
+  })
+  out
 }
 
 db_quote <- function(x) {
-  con <- db_con()
-  on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-  dbQuoteString(con, x)
+  con <- NULL
+  out <- tryCatch({
+    con <- db_con()
+    DBI::dbQuoteString(con, x)
+  }, error = function(e) {
+    # fallback quoting so the app doesn't crash
+    DBI::SQL(paste0("'", gsub("'", "''", x %||% ""), "'"))
+  }, finally = {
+    if (!is.null(con)) try(DBI::dbDisconnect(con), silent = TRUE)
+  })
+  out
 }
-
 
 # ======================================================
 # UI
@@ -134,6 +191,40 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   
   logged_in <- reactiveVal(FALSE)
+  
+  db_status_txt <- reactiveVal("Checking...")
+  
+  output$db_status <- renderText({
+    db_status_txt()
+  })
+  
+  observe({
+    # update status every ~10s while logged in
+    invalidateLater(10000, session)
+    if (!isTRUE(logged_in())) {
+      db_status_txt("Not logged in")
+      return()
+    }
+    
+    # Try a lightweight ping
+    ok <- tryCatch({
+      con <- db_con()
+      on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+      
+      # Proof it's Aiven-ish: VERSION() shows mariadb + often "aiven" build/hostnames
+      v <- dbGetQuery(con, "SELECT VERSION() AS v")$v[1]
+      d <- dbGetQuery(con, "SELECT DATABASE() AS d")$d[1]
+      n <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM movies")$n[1]
+      
+      db_status_txt(paste0("✅ Connected | DB=", d, " | movies=", n, " | ver=", v))
+      TRUE
+    }, error = function(e) {
+      db_status_txt(paste0("❌ DB error: ", conditionMessage(e)))
+      FALSE
+    })
+    
+    ok
+  })
   
   observeEvent(logged_in(), {
     req(logged_in())
