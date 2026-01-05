@@ -7,12 +7,31 @@ library(DBI)
 library(RMariaDB)
 library(jsonlite)
 
+message("DB_HOST=", Sys.getenv("DB_HOST"))
+message("DB_PORT=", Sys.getenv("DB_PORT"))
+message("DB_NAME=", Sys.getenv("DB_NAME"))
+message("DB_SSL_CA exists? ", file.exists(Sys.getenv("DB_SSL_CA")))
+
 source("login.R")
 source("top_rated_page.R")
 
 
+# ======================================================
+# DATABASE CONNECTION
+# ======================================================
+get_con <- function() {
+  dbConnect(
+    RMariaDB::MariaDB(),
+    host     = Sys.getenv("DB_HOST"),
+    port     = as.integer(Sys.getenv("DB_PORT", "3306")),
+    user     = Sys.getenv("DB_USER"),
+    password = Sys.getenv("DB_PASS"),
+    dbname   = Sys.getenv("DB_NAME"),
+    ssl.ca   = Sys.getenv("DB_SSL_CA")
+  )
+}
 
-
+con <- get_con()
 # ======================================================
 # UI
 # ======================================================
@@ -66,71 +85,6 @@ ui <- fluidPage(
 # SERVER
 # ======================================================
 server <- function(input, output, session) {
-  # ================= CLOUD MYSQL (AIVEN) SAFE CONNECT =================
-  get_con <- function() {
-    DB_HOST   <- Sys.getenv("DB_HOST", "")
-    DB_PORT   <- as.integer(Sys.getenv("DB_PORT", "3306"))
-    DB_USER   <- Sys.getenv("DB_USER", "")
-    DB_PASS   <- Sys.getenv("DB_PASS", "")
-    DB_NAME   <- Sys.getenv("DB_NAME", "")
-    DB_SSL_CA <- Sys.getenv("DB_SSL_CA", "")
-    
-    if (!nzchar(DB_HOST) || !nzchar(DB_USER) || !nzchar(DB_NAME)) {
-      stop("Missing DB env vars (DB_HOST/DB_USER/DB_NAME).")
-    }
-    if (!nzchar(DB_SSL_CA) || !file.exists(DB_SSL_CA)) {
-      stop(paste0("CA cert not found. DB_SSL_CA=", DB_SSL_CA))
-    }
-    
-    DBI::dbConnect(
-      RMariaDB::MariaDB(),
-      host = DB_HOST,
-      port = DB_PORT,
-      user = DB_USER,
-      password = DB_PASS,
-      dbname = DB_NAME,
-      ssl.ca = DB_SSL_CA,
-      ssl.verify.server.cert = TRUE,
-      connect_timeout = 10
-    )
-  }
-  
-  db_exec <- function(sql, params = NULL) {
-    con <- get_con()
-    on.exit(try(DBI::dbDisconnect(con), silent = TRUE), add = TRUE)
-    DBI::dbExecute(con, sql, params = params)
-  }
-  
-  db_get <- function(sql, params = NULL) {
-    con <- get_con()
-    on.exit(try(DBI::dbDisconnect(con), silent = TRUE), add = TRUE)
-    DBI::dbGetQuery(con, sql, params = params)
-  }
-  
-  tryCatch({
-    db_exec("
-    CREATE TABLE IF NOT EXISTS movies (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      title VARCHAR(255) NOT NULL,
-      year_released INT,
-      genre VARCHAR(255),
-      type VARCHAR(50),
-      description TEXT,
-      finished TINYINT(1) DEFAULT 0,
-      rating DECIMAL(3,1) DEFAULT NULL,
-      poster_path TEXT,
-      video_path LONGTEXT,
-      youtube_trailer TEXT,
-      favorite TINYINT(1) DEFAULT 0,
-      currently_watching TINYINT(1) DEFAULT 0,
-      last_season INT DEFAULT NULL,
-      last_episode INT DEFAULT NULL
-    )
-  ")
-  }, error = function(e) {
-    message("DB INIT ERROR: ", conditionMessage(e))
-  })
-  
   
   logged_in <- reactiveVal(FALSE) 
   
@@ -200,8 +154,10 @@ server <- function(input, output, session) {
   show_details_modal <- function(mid) {
     
     movies <- load_movies()
-    m <- db_get("SELECT * FROM movies WHERE id = ?", params = list(as.integer(mid)))
-    
+    m <- dbGetQuery(
+      con,
+      paste0("SELECT * FROM movies WHERE id = ", mid)
+    )
     req(nrow(m) == 1)
     
     yt_id <- ""
@@ -363,7 +319,7 @@ server <- function(input, output, session) {
   
   load_movies <- reactive({
     refresh_trigger()
-    db_get("SELECT * FROM movies ORDER BY id DESC")
+    dbGetQuery(con,"SELECT * FROM movies ORDER BY id DESC")
     
   })
   top_rated_server(input, output, session, load_movies)
@@ -911,8 +867,15 @@ server <- function(input, output, session) {
         
         new_val <- ifelse(m$favorite == 1, 0, 1)
         
-        db_exec("UPDATE movies SET favorite = ? WHERE id = ?",
-                params = list(as.integer(new_val), as.integer(mid)))
+        dbExecute(
+          con,
+          paste0(
+            "UPDATE movies SET favorite = ",
+            new_val,
+            " WHERE id = ",
+            mid
+          )
+        )
         
         refresh_trigger(refresh_trigger() + 1)
         
@@ -1964,3 +1927,5 @@ server <- function(input, output, session) {
     showNotification("Saved successfully!",type="message")
   })
 }
+
+shinyApp(ui, server)

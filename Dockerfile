@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y \
 RUN R -e "install.packages(c('shiny','shinyWidgets','DBI','RMySQL','RMariaDB','jsonlite','digest'), repos='https://cloud.r-project.org')"
 
 # --- copy CA first (from repo root) ---
-COPY ca.pem /etc/ssl/certs/aiven-ca.pem
-RUN chmod 644 /etc/ssl/certs/aiven-ca.pem
+COPY ca.pem /srv/shiny-server/ca.pem
+RUN chmod 644 /srv/shiny-server/ca.pem
 
 # --- copy app to shiny-server root so it runs at "/" ---
 COPY . /srv/shiny-server/
