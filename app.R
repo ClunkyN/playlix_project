@@ -4,131 +4,25 @@ options(shiny.maxRequestSize = 200 * 1024^2)
 library(shiny)
 library(shinyWidgets)
 library(DBI)
-library(RMariaDB)
+library(RMySQL)
 library(jsonlite)
-
-message("DB_HOST=", Sys.getenv("DB_HOST"))
-message("DB_PORT=", Sys.getenv("DB_PORT"))
-message("DB_USER=", Sys.getenv("DB_USER"))
-message("DB_NAME=", Sys.getenv("DB_NAME"))
-message("DB_SSL_CA env=", Sys.getenv("DB_SSL_CA"))
-message("DB_SSL_CA exists? ", file.exists(Sys.getenv("DB_SSL_CA")))
-message("/srv/shiny-server/ca.pem exists? ", file.exists("/srv/shiny-server/ca.pem"))
-
 
 source("login.R")
 source("top_rated_page.R")
 
+
 # ======================================================
-# DATABASE HELPERS (RENDER + AIVEN MariaDB)
-# - Works with SSL CA
-# - Handles DB_HOST with or without ":port"
-# - Prevents app crash (returns safe errors)
-# - Provides "proof" you're on Aiven
+# DATABASE CONNECTION
 # ======================================================
-
-parse_host_port <- function(host, port_default = 3306) {
-  host <- trimws(host %||% "")
-  if (!nzchar(host)) return(list(host = "", port = port_default))
-  
-  # If host is like "xxx.aivencloud.com:12345"
-  if (grepl(":", host, fixed = TRUE)) {
-    parts <- strsplit(host, ":", fixed = TRUE)[[1]]
-    h <- parts[1]
-    p <- suppressWarnings(as.integer(parts[2]))
-    if (is.na(p)) p <- port_default
-    return(list(host = h, port = p))
-  }
-  
-  list(host = host, port = port_default)
-}
-
-`%||%` <- function(a, b) if (!is.null(a) && length(a) > 0 && !is.na(a) && nzchar(as.character(a))) a else b
-
-resolve_ca_path <- function() {
-  ca <- Sys.getenv("DB_SSL_CA", "")
-  if (nzchar(ca) && file.exists(ca)) return(ca)
-  
-  # fallback location you COPY into image
-  if (file.exists("/srv/shiny-server/ca.pem")) return("/srv/shiny-server/ca.pem")
-  
-  # common alt paths (optional)
-  if (file.exists("/etc/ssl/certs/ca.pem")) return("/etc/ssl/certs/ca.pem")
-  
-  ""  # no CA found
-}
-
-db_con <- function() {
-  hp <- parse_host_port(Sys.getenv("DB_HOST", ""), as.integer(Sys.getenv("DB_PORT", "3306")))
-  ca <- resolve_ca_path()
-  
-  # ---- HARD FAIL EARLY with readable errors ----
-  if (!nzchar(hp$host)) stop("DB_HOST is empty. Set DB_HOST in Render environment variables.")
-  if (!nzchar(Sys.getenv("DB_USER", ""))) stop("DB_USER is empty. Set DB_USER in Render env vars.")
-  if (!nzchar(Sys.getenv("DB_PASS", ""))) stop("DB_PASS is empty. Set DB_PASS in Render env vars.")
-  if (!nzchar(Sys.getenv("DB_NAME", ""))) stop("DB_NAME is empty. Set DB_NAME in Render env vars.")
-  
-  # Aiven requires SSL; if CA missing, fail with clear message
-  if (!nzchar(ca)) {
-    stop("SSL CA file not found. Set DB_SSL_CA to the CA path or copy ca.pem to /srv/shiny-server/ca.pem.")
-  }
-  
-  con <- DBI::dbConnect(
-    RMariaDB::MariaDB(),
-    host     = hp$host,
-    port     = hp$port,
-    user     = Sys.getenv("DB_USER"),
-    password = Sys.getenv("DB_PASS"),
-    dbname   = Sys.getenv("DB_NAME"),
-    ssl.ca   = ca,
-    ssl.verify.server.cert = TRUE,
-    timeout  = 15
-  )
-  
-  con
-}
-
-db_get <- function(sql) {
-  con <- NULL
-  out <- tryCatch({
-    con <- db_con()
-    DBI::dbGetQuery(con, sql)
-  }, error = function(e) {
-    message("❌ db_get error: ", conditionMessage(e))
-    NULL
-  }, finally = {
-    if (!is.null(con)) try(DBI::dbDisconnect(con), silent = TRUE)
-  })
-  out
-}
-
-db_exec <- function(sql) {
-  con <- NULL
-  out <- tryCatch({
-    con <- db_con()
-    DBI::dbExecute(con, sql)
-  }, error = function(e) {
-    message("❌ db_exec error: ", conditionMessage(e))
-    NULL
-  }, finally = {
-    if (!is.null(con)) try(DBI::dbDisconnect(con), silent = TRUE)
-  })
-  out
-}
-
-db_quote <- function(x) {
-  con <- NULL
-  out <- tryCatch({
-    con <- db_con()
-    DBI::dbQuoteString(con, x)
-  }, error = function(e) {
-    # fallback quoting so the app doesn't crash
-    DBI::SQL(paste0("'", gsub("'", "''", x %||% ""), "'"))
-  }, finally = {
-    if (!is.null(con)) try(DBI::dbDisconnect(con), silent = TRUE)
-  })
-  out
-}
+# Use environment variables for Render + Aiven
+con <- dbConnect(
+  RMySQL::MySQL(),
+  host = Sys.getenv("DB_HOST"),
+  user = Sys.getenv("DB_USER"),
+  password = Sys.getenv("DB_PASSWORD"),
+  dbname = Sys.getenv("DB_NAME"),
+  port = as.integer(Sys.getenv("DB_PORT", "3306"))
+)
 
 # ======================================================
 # UI
@@ -159,12 +53,6 @@ main_ui <- fluidPage(
       )
     ),
     
-    div(
-      style="padding:10px 20px; background:#111; color:#0f0; font-family:monospace; font-size:12px;",
-      strong("DB STATUS: "),
-      textOutput("db_status", inline = TRUE)
-    ),
-    
     div(style = "height: 78px;"),
     div(
       class = "page-nav",
@@ -190,122 +78,9 @@ ui <- fluidPage(
 # ======================================================
 server <- function(input, output, session) {
   
-  logged_in <- reactiveVal(FALSE)
-  
-  db_status_txt <- reactiveVal("Checking...")
-  
-  output$db_status <- renderText({
-    db_status_txt()
-  })
-  
-  observe({
-    # update status every ~10s while logged in
-    invalidateLater(10000, session)
-    if (!isTRUE(logged_in())) {
-      db_status_txt("Not logged in")
-      return()
-    }
-    
-    # Try a lightweight ping
-    ok <- tryCatch({
-      con <- db_con()
-      on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-      
-      # Proof it's Aiven-ish: VERSION() shows mariadb + often "aiven" build/hostnames
-      v <- dbGetQuery(con, "SELECT VERSION() AS v")$v[1]
-      d <- dbGetQuery(con, "SELECT DATABASE() AS d")$d[1]
-      n <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM movies")$n[1]
-      
-      db_status_txt(paste0("✅ Connected | DB=", d, " | movies=", n, " | ver=", v))
-      TRUE
-    }, error = function(e) {
-      db_status_txt(paste0("❌ DB error: ", conditionMessage(e)))
-      FALSE
-    })
-    
-    ok
-  })
-  
-  observeEvent(logged_in(), {
-    req(logged_in())
-    
-    tryCatch({
-      dbn <- db_get("SELECT DATABASE() AS db")$db[1]
-      message("✅ Connected DB = ", dbn)
-      
-      tabs <- db_get("SHOW TABLES")
-      if (nrow(tabs) == 0) {
-        message("⚠ No tables found in this DB_NAME (empty schema).")
-      } else {
-        message("✅ Tables: ", paste(tabs[[1]], collapse = ", "))
-      }
-      
-      # check movies count
-      cnt <- db_get("SELECT COUNT(*) AS n FROM movies")$n[1]
-      message("✅ movies rows = ", cnt)
-    }, error = function(e) {
-      message("❌ DB sanity check failed: ", conditionMessage(e))
-    })
-  }, ignoreInit = TRUE)
+  logged_in <- reactiveVal(FALSE) 
   
   login_server(input, output, session, logged_in)
-  
-  observeEvent(logged_in(), {
-    req(logged_in())
-    
-    message("========== DB CONNECTION TEST ==========")
-    
-    message("DB_HOST=", Sys.getenv("DB_HOST"))
-    message("DB_PORT=", Sys.getenv("DB_PORT"))
-    message("DB_USER=", Sys.getenv("DB_USER"))
-    message("DB_NAME=", Sys.getenv("DB_NAME"))
-    message("DB_SSL_CA env=", Sys.getenv("DB_SSL_CA"))
-    
-    message("CA exists? ", file.exists(Sys.getenv("DB_SSL_CA")))
-    message("Fallback CA exists? ", file.exists("/srv/shiny-server/ca.pem"))
-    
-    tryCatch({
-      con <- db_con()
-      on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-      
-      message("✅ db_con(): SUCCESS")
-      
-      # PROOF 1: where am I connected?
-      host_now <- dbGetQuery(con, "SELECT @@hostname AS h")$h[1]
-      port_now <- dbGetQuery(con, "SELECT @@port AS p")$p[1]
-      user_now <- dbGetQuery(con, "SELECT CURRENT_USER() AS u")$u[1]
-      db_now   <- dbGetQuery(con, "SELECT DATABASE() AS d")$d[1]
-      ver_now  <- dbGetQuery(con, "SELECT VERSION() AS v")$v[1]
-      
-      message("✅ SERVER_HOSTNAME=", host_now)
-      message("✅ SERVER_PORT=", port_now)
-      message("✅ CURRENT_USER=", user_now)
-      message("✅ DATABASE=", db_now)
-      message("✅ VERSION=", ver_now)
-      
-      # PROOF 2: schema sanity
-      tables <- dbGetQuery(con, "SHOW TABLES")
-      message("✅ Tables found = ", nrow(tables))
-      if (nrow(tables) > 0) {
-        message("✅ Tables: ", paste(tables[[1]], collapse = ", "))
-      }
-      
-      # PROOF 3: your app table
-      if (nrow(tables) > 0 && "movies" %in% tables[[1]]) {
-        cnt <- dbGetQuery(con, "SELECT COUNT(*) AS n FROM movies")$n[1]
-        message("✅ movies row count = ", cnt)
-      } else {
-        message("❌ movies table NOT FOUND in this DB")
-      }
-      
-    }, error = function(e) {
-      message("❌ DB CONNECTION FAILED: ", conditionMessage(e))
-    })
-    
-    message("========== END DB TEST ==========")
-    
-  }, ignoreInit = TRUE)
-  
   output$app_page <- renderUI({
     if (logged_in()) {
       main_ui
@@ -371,7 +146,8 @@ server <- function(input, output, session) {
   show_details_modal <- function(mid) {
     
     movies <- load_movies()
-    m <- db_get(
+    m <- dbGetQuery(
+      con,
       paste0("SELECT * FROM movies WHERE id = ", mid)
     )
     req(nrow(m) == 1)
@@ -535,16 +311,9 @@ server <- function(input, output, session) {
   
   load_movies <- reactive({
     refresh_trigger()
-    tryCatch(
-      db_get("SELECT * FROM movies ORDER BY id DESC"),
-      error = function(e) {
-        message("❌ load_movies error: ", conditionMessage(e))
-        data.frame()
-      }
-    )
+    dbGetQuery(con,"SELECT * FROM movies ORDER BY id DESC")
+    
   })
-  
-  
   top_rated_server(input, output, session, load_movies)
   
   filtered_movies <- reactive({
@@ -698,7 +467,8 @@ server <- function(input, output, session) {
                                e   = current_episode_idx()) {
     if (is.null(mid) || is.null(s) || is.null(e)) return()
     
-    db_exec(
+    dbExecute(
+      con,
       paste0(
         "UPDATE movies SET ",
         "last_season = ", as.integer(s), ", ",
@@ -773,7 +543,8 @@ server <- function(input, output, session) {
           
           
           
-          db_exec(
+          dbExecute(
+            con,
             paste0(
               "UPDATE movies 
               SET finished = 1,
@@ -1088,7 +859,8 @@ server <- function(input, output, session) {
         
         new_val <- ifelse(m$favorite == 1, 0, 1)
         
-        db_exec(
+        dbExecute(
+          con,
           paste0(
             "UPDATE movies SET favorite = ",
             new_val,
@@ -1342,7 +1114,8 @@ server <- function(input, output, session) {
         rating <- as.numeric(input$detail_rating)
         rating_sql <- if (is.na(rating)) "NULL" else round(rating, 1)
         
-        db_exec(
+        dbExecute(
+          con,
           paste0(
             "UPDATE movies SET
             finished = 1,
@@ -1356,7 +1129,8 @@ server <- function(input, output, session) {
         
       } else {
         
-        db_exec(
+        dbExecute(
+          con,
           paste0(
             "UPDATE movies 
            SET finished = 0,
@@ -1389,7 +1163,7 @@ server <- function(input, output, session) {
         
         observeEvent(input$confirm_delete_movie, {
           if (!allow_click(paste0("confirm_delete_", mid))) return()
-          db_exec(paste0("DELETE FROM movies WHERE id = ", mid))
+          dbExecute(con, paste0("DELETE FROM movies WHERE id = ", mid))
           removeModal()
           removeModal()
           refresh_trigger(refresh_trigger() + 1)
@@ -1613,16 +1387,16 @@ server <- function(input, output, session) {
             video_db <- jsonlite::toJSON(seasons, auto_unbox = TRUE)
           }
           
-          db_exec(paste0(
+          dbExecute(con, paste0(
             "UPDATE movies SET ",
-            "title=", db_quote(input$edit_title), ",",
+            "title=", dbQuoteString(con, input$edit_title), ",",
             "year_released=", input$edit_year, ",",
-            "genre=", db_quote(input$edit_genre), ",",
-            "type=", db_quote(input$edit_type), ",",
-            "description=", db_quote(input$edit_desc), ",",
-            "poster_path=", db_quote(input$edit_poster), ",",
-            "video_path=", db_quote(video_db), ",",
-            "youtube_trailer=", db_quote(input$edit_trailer),
+            "genre=", dbQuoteString(con, input$edit_genre), ",",
+            "type=", dbQuoteString(con, input$edit_type), ",",
+            "description=", dbQuoteString(con, input$edit_desc), ",",
+            "poster_path=", dbQuoteString(con, input$edit_poster), ",",
+            "video_path=", dbQuoteString(con, video_db), ",",
+            "youtube_trailer=", dbQuoteString(con, input$edit_trailer),
             " WHERE id=", mid
           ))
           
@@ -1672,7 +1446,8 @@ server <- function(input, output, session) {
           
           # 🔒 DO NOT override finished movies
           if (!isTRUE(m$finished == 1)) {
-            db_exec(
+            dbExecute(
+              con,
               paste0(
                 "UPDATE movies SET
          currently_watching = 1
@@ -2121,19 +1896,20 @@ server <- function(input, output, session) {
       video_db <- jsonlite::toJSON(seasons, auto_unbox = TRUE)
     }
     
-    db_exec(
+    dbExecute(
+      con,
       paste0(
         "INSERT INTO movies (title,year_released,genre,type,description,finished,rating,poster_path,video_path,youtube_trailer) VALUES(",
-        db_quote(input$new_title), ",",
+        dbQuoteString(con, input$new_title), ",",
         input$new_year, ",",
-        db_quote(input$new_genre), ",",
-        db_quote(input$new_type), ",",
-        db_quote(input$new_desc), ",",
+        dbQuoteString(con, input$new_genre), ",",
+        dbQuoteString(con, input$new_type), ",",
+        dbQuoteString(con, input$new_desc), ",",
         "0,",            # finished = FALSE by default
         "NULL,",         # rating = NULL by default
-        db_quote(input$poster_url), ",",
-        db_quote(video_db), ",",
-        db_quote(input$new_trailer),
+        dbQuoteString(con, input$poster_url), ",",
+        dbQuoteString(con, video_db), ",",
+        dbQuoteString(con, input$new_trailer),
         ")"
       )
     )
