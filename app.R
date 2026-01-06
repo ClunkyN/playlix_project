@@ -12,17 +12,36 @@ source("top_rated_page.R")
 
 
 # ======================================================
-# DATABASE CONNECTION
+# DATABASE CONNECTION (safe)
 # ======================================================
-# Use environment variables for Render + Aiven
-con <- dbConnect(
-  RMySQL::MySQL(),
-  host = Sys.getenv("DB_HOST"),
-  user = Sys.getenv("DB_USER"),
-  password = Sys.getenv("DB_PASSWORD"),
-  dbname = Sys.getenv("DB_NAME"),
-  port = as.integer(Sys.getenv("DB_PORT", "3306"))
-)
+# Read DB settings from environment (set these in Render)
+db_host <- Sys.getenv("DB_HOST")
+db_user <- Sys.getenv("DB_USER")
+db_password <- Sys.getenv("DB_PASSWORD")
+db_name <- Sys.getenv("DB_NAME")
+db_port <- as.integer(Sys.getenv("DB_PORT", "3306"))
+
+# Initialize connection to NULL. If environment variables are missing or
+# connection fails, we keep `con` NULL so Shiny server doesn't crash during init.
+con <- NULL
+if (nzchar(db_host) && nzchar(db_user) && nzchar(db_password) && nzchar(db_name)) {
+  tryCatch({
+    con <- dbConnect(
+      RMySQL::MySQL(),
+      host = db_host,
+      user = db_user,
+      password = db_password,
+      dbname = db_name,
+      port = db_port
+    )
+    message("Database connected")
+  }, error = function(e) {
+    warning("Failed to connect to database during initialization: ", conditionMessage(e))
+    con <<- NULL
+  })
+} else {
+  message("Database environment variables not fully set; running without DB connection.")
+}
 
 # ======================================================
 # UI
