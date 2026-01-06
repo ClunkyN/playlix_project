@@ -89,8 +89,21 @@ if (nzchar(db_host) && nzchar(db_user) && nzchar(db_password) && nzchar(db_name)
 # ======================================================
 # LOAD SOURCE FILES (after DB connection established)
 # ======================================================
-source("login.R")
-source("top_rated_page.R")
+tryCatch({
+  source("login.R")
+  log_startup("Loaded login.R successfully")
+}, error = function(e) {
+  log_startup("ERROR loading login.R:", conditionMessage(e))
+  warning("Failed to load login.R: ", conditionMessage(e))
+})
+
+tryCatch({
+  source("top_rated_page.R")
+  log_startup("Loaded top_rated_page.R successfully")
+}, error = function(e) {
+  log_startup("ERROR loading top_rated_page.R:", conditionMessage(e))
+  warning("Failed to load top_rated_page.R: ", conditionMessage(e))
+})
 
 # ======================================================
 # UI
