@@ -8,10 +8,6 @@ library(RMySQL)
 library(RMariaDB)
 library(jsonlite)
 
-source("login.R")
-source("top_rated_page.R")
-
-
 # ======================================================
 # DATABASE CONNECTION (safe)
 # ======================================================
@@ -89,6 +85,12 @@ if (nzchar(db_host) && nzchar(db_user) && nzchar(db_password) && nzchar(db_name)
   message("Database environment variables not fully set; running without DB connection.")
   log_startup("Database environment variables not fully set; skipping DB connect.")
 }
+
+# ======================================================
+# LOAD SOURCE FILES (after DB connection established)
+# ======================================================
+source("login.R")
+source("top_rated_page.R")
 
 # ======================================================
 # UI
