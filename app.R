@@ -26,6 +26,30 @@ db_ssl_ca <- Sys.getenv("DB_SSL_CA")
 # Initialize connection to NULL. If environment variables are missing or
 # connection fails, we keep `con` NULL so Shiny server doesn't crash during init.
 con <- NULL
+
+# --- startup logging helper -------------------------------------------------
+startup_log_path <- "/srv/shiny-server/startup.log"
+log_startup <- function(...) {
+  msg <- paste0(format(Sys.time(), "%Y-%m-%d %H:%M:%S %z"), " - ", paste(..., collapse = " "), "\n")
+  # Write to stdout for Render logs
+  message(msg)
+  # Also append to local file if writable
+  try({
+    cat(msg, file = startup_log_path, append = TRUE)
+  }, silent = TRUE)
+}
+
+# Log environment (safe): don't print secrets
+log_startup("Startup: checking environment variables and files...")
+log_startup("DB_HOST=", ifelse(nzchar(db_host), db_host, "<missing>"))
+log_startup("DB_USER=", ifelse(nzchar(db_user), db_user, "<missing>"))
+log_startup("DB_NAME=", ifelse(nzchar(db_name), db_name, "<missing>"))
+log_startup("DB_PORT=", db_port)
+log_startup("DB_SSL_CA=", ifelse(nzchar(db_ssl_ca), db_ssl_ca, "<not set>"))
+if (nzchar(db_ssl_ca)) {
+  exists_ca <- file.exists(db_ssl_ca)
+  log_startup("CA file exists at DB_SSL_CA:", exists_ca)
+}
 if (nzchar(db_host) && nzchar(db_user) && nzchar(db_password) && nzchar(db_name)) {
   tryCatch({
     if (nzchar(db_ssl_ca)) {
@@ -51,12 +75,19 @@ if (nzchar(db_host) && nzchar(db_user) && nzchar(db_password) && nzchar(db_name)
       )
     }
     message("Database connected")
+    # try a simple test query
+    try({
+      res <- dbGetQuery(con, "SELECT 1 AS ok")
+      log_startup("DB test query result:", paste(capture.output(print(res)), collapse = " "))
+    }, silent = TRUE)
   }, error = function(e) {
     warning("Failed to connect to database during initialization: ", conditionMessage(e))
+    log_startup("DB connection error:", conditionMessage(e))
     con <<- NULL
   })
 } else {
   message("Database environment variables not fully set; running without DB connection.")
+  log_startup("Database environment variables not fully set; skipping DB connect.")
 }
 
 # ======================================================
